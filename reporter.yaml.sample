@@ -1,0 +1,6 @@
+grr:
+  url: "http://localhost:8096"
+grafana:
+  url: "http://localhost:8080/api"
+  user: "admin"
+  pass: "mysuperduperadminpassword"
