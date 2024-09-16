@@ -40,16 +40,29 @@ func MakeGrafanaClient(baseUrl string, username string, password string) (*Grafa
 	return &GrafanaClient{client}, nil
 }
 
+func (c *GrafanaClient) IsOK() (bool, error) {
+	oopsBuilder := oops.In("IsOK")
+	ok, err := c.client.Health.GetHealth()
+	if err != nil {
+		return false, oopsBuilder.Wrap(err)
+	}
+	if !ok.IsSuccess() {
+		return false, oopsBuilder.Errorf("health request was not successful")
+	}
+	return true, nil
+}
+
 func (c *GrafanaClient) GetOrgs() ([]*models.OrgDTO, error) {
+	oopsBuilder := oops.In("GetOrgs")
 	orgs, err := c.client.Orgs.SearchOrgs(nil, nil)
 	if err != nil {
-		return nil, oops.
-			In("GetOrgs").
+		return nil, oopsBuilder.
+			Hint("client.SearchOrgs != nil").
 			Wrap(err)
 	}
 	if !orgs.IsSuccess() {
-		return nil, oops.
-			In("GetOrgs").
+		return nil, oopsBuilder.
+			Hint("client.SearchOrgs.IsSuccess()").
 			With("orgs", orgs).
 			Wrap(err)
 	}
@@ -173,11 +186,12 @@ func (c *GrafanaClient) GetDashboardsInOrg(orgID int64) ([]mymodels.Dashboard, e
 			// Write to cache; mind the threads!
 			putDashInCache(vv.UID, dashReq.GetPayload().Dashboard)
 		}
-
+	
 		filteredDashboards = append(filteredDashboards, mymodels.Dashboard{
 			ID: vv.ID,
 			UID: vv.UID,
 			Title: vv.Title,
+			FolderTitle: vv.FolderTitle,
 			Slug: vv.Slug,
 			OrgID: orgData.ID,
 			OrgName: orgData.Name,
@@ -217,18 +231,27 @@ func (c *GrafanaClient) GetVariablesInDashboard(dashUid string) (map[string]stri
 		templateList := templating.(map[string]interface{})["list"]
 		if templateList != nil {
 			for _, v := range templateList.([]interface{}) {
-				// at _least_ I can cast into structs...
-				if x == nil { continue }
-				x := v.(struct {
-					name string
-					current struct {
-						text string
-						value string
+				v := v.(map[string]interface{})
+				//spew.Dump(v)
+				if v == nil { continue }
+				var varName string
+				var varValue string
+				var okName bool
+				var okCurrent bool
+				var okCurrentValue bool
+				name, okName := v["name"].(string)
+				if okName {
+					varName = name
+				}
+				current, okCurrent := v["current"].(map[string]interface{})
+				if okCurrent {
+					currentValue, sub_okCurrentValue := current["text"].(string)
+					okCurrentValue = sub_okCurrentValue
+					if okCurrentValue {
+						varValue = currentValue
 					}
-				})
-				name := x.name
-				current := x.current.value
-				vars[name] = current
+				}
+				vars[varName] = varValue
 			}
 		}
 	}
