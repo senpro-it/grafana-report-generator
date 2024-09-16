@@ -4,8 +4,10 @@ go 1.22.2
 
 require (
 	github.com/charmbracelet/log v0.4.0
+	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc
 	github.com/go-openapi/strfmt v0.23.0
 	github.com/grafana/grafana-openapi-client-go v0.0.0-20240826142251-d1c93bae4198
+	github.com/joho/godotenv v1.5.1
 	github.com/samber/oops v1.13.1
 	github.com/spf13/viper v1.19.0
 )
@@ -13,7 +15,6 @@ require (
 require (
 	github.com/oklog/ulid/v2 v2.1.0 // indirect
 	github.com/samber/lo v1.38.1 // indirect
-	github.com/shivamMg/ppds v0.0.1 // indirect
 )
 
 require (
