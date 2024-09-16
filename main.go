@@ -5,9 +5,11 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/charmbracelet/log"
 	"github.com/grafana/grafana-openapi-client-go/models"
+	"github.com/joho/godotenv"
 	"github.com/samber/oops"
 	mymodels "github.com/senpro-it/grafana-report-generator/models"
 	"github.com/sourcegraph/conc/iter"
@@ -39,6 +41,12 @@ var v = viper.NewWithOptions(viper.WithLogger(slog.New(logger)))
 func main() {
 	// configure oops
 	oops.SourceFragmentsHidden = false
+
+	err := godotenv.Load()
+	if err != nil {
+		err := oops.Wrap(err)
+		logger.Fatal(err.Error(), "error", err) //.WithAttrs(slog.Any("err", err)
+	}
 	
 	// Configure viper
 	pflag.String("grr.url", "http://localhost:8989", "Grafana Ruby Reporter endpoint")
@@ -82,9 +90,11 @@ func main() {
 		logger.SetLevel(log.DebugLevel)
 	}
 
-	logger.Info("Configuration loaded!")
-	//logger.Info(spew.Sdump(v.AllKeys()))
-	//logger.Info(v.GetString("grafana.url"))
+	logger.Info("Configuration loaded!",
+		"grafana.url", v.GetString("grafana.url"),
+		"grafana.user", v.GetString("grafana.user"),
+		"grr.url", v.GetString("grr.url"),
+	)
 
 	// Step 0: Open Grafana
 	grafana, err := MakeGrafanaClient(
@@ -96,6 +106,14 @@ func main() {
 		logger.Fatal(err.Error(), "error", err)
 	}
 
+	ok, err := grafana.IsOK()
+	if err != nil {
+		logger.Error(err.Error(), "error", err)
+	}
+	if !ok {
+		logger.Fatal("Grafana is NOT OK. Are the user creds correct?")
+	}
+
 	// Step 1: Get orgs
 	orgs, err := grafana.GetOrgs()
 	if err != nil {
@@ -103,33 +121,40 @@ func main() {
 		logger.Fatal(err.Error(), "error", err)
 	}
 
-	// Step 2: Get Dashboards
-	iter.ForEach(orgs, func(orgPtr **models.OrgDTO){
+	// step 1.5: Reorganize orgs
+	orgMap := make(map[int64]*models.OrgDTO)
+	for _, o := range orgs {
+		orgMap[o.ID] = o
+	}
+
+	// Step 2: Get Dashboards per org
+	dashLock := sync.Mutex{}
+	dashMap := make(map[int64][]*mymodels.DetailedDashboard)
+	_, err = iter.MapErr(orgs, func(orgPtr **models.OrgDTO) ([]*mymodels.DetailedDashboard, error) {
 		org := *orgPtr
 		logger := logger.WithPrefix(fmt.Sprintf("(%d) %s", org.ID, org.Name))
 		dashboards, err := grafana.GetDashboardsInOrg(org.ID)
 		if err != nil {
-			err = oops.
+			return nil, oops.
 				With("orgID", org.ID).
 				With("orgName", org.Name).
 				Wrap(err)
-			logger.Fatal(err.Error(), "error", err)
 		}
 
 		detailedDashboards, err := iter.MapErr(dashboards, func(dashPtr *mymodels.Dashboard) (*mymodels.DetailedDashboard, error) {
 			dash := *dashPtr
 			vars, err := grafana.GetVariablesInDashboard(dash.UID)
 			if err != nil {
-				err = oops.
+				return nil, oops.
 					With("dash", dash).
 					Wrap(err)
-				return nil, err
 			}
 
 			logger.
 				With("ID", dash.ID).
 				With("UID", dash.UID).
 				With("Title", dash.Title).
+				With("FolderTitle", dash.FolderTitle).
 				Info("Found.")
 			
 			details := &mymodels.DetailedDashboard{
@@ -138,9 +163,17 @@ func main() {
 			}
 			return details, nil
 		})
-
-		for _, dash := range detailedDashboards {
-			logger.Info(dash.Variables)
+		if err != nil {
+			return nil, err
 		}
+
+		dashLock.Lock()
+		dashMap[org.ID] = detailedDashboards
+		dashLock.Unlock()
+
+		return detailedDashboards, nil
 	})
+
+	// Step 3: Convert org+dashboard to GRR requests
+	
 }
