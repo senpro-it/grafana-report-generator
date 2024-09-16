@@ -1,13 +1,15 @@
 package main
 
 import (
-	"errors"
 	"net/url"
+	"sync"
 
 	"github.com/go-openapi/strfmt"
 	grafana "github.com/grafana/grafana-openapi-client-go/client"
+	client_dashboards "github.com/grafana/grafana-openapi-client-go/client/dashboards"
 	"github.com/grafana/grafana-openapi-client-go/client/search"
 	"github.com/grafana/grafana-openapi-client-go/models"
+	"github.com/samber/oops"
 	mymodels "github.com/senpro-it/grafana-report-generator/models"
 	"github.com/senpro-it/grafana-report-generator/tools"
 )
@@ -16,54 +18,219 @@ type GrafanaClient struct {
 	client *grafana.GrafanaHTTPAPI
 }
 
-func MakeGrafanaClient(baseUrl string, apiToken string) GrafanaClient {
-	url, err := url.Parse(baseUrl)
+// Crude and unencapsulated cache.
+var dashboardCacheMutex = sync.Mutex{}
+var dashboardCache = make(map[string]models.JSON)
+
+func MakeGrafanaClient(baseUrl string, username string, password string) (*GrafanaClient, error) {
+	gurl, err := url.Parse(baseUrl)
 	if err != nil {
-		logger.Fatal("Unable to parse URL!", "url", baseUrl)
+		return nil, oops.
+			In("MakeGrafanaClient").
+			User(username).
+			With("baseUrl", baseUrl).
+			Wrap(err)
 	}
 	cfg := &grafana.TransportConfig{
-		Host:     url.Host,
-		BasePath: url.Path,
-		APIKey:   apiToken,
+		Host:     gurl.Host,
+		BasePath: gurl.Path,
+		BasicAuth: url.UserPassword(username, password),
 	}
 	client := grafana.NewHTTPClientWithConfig(strfmt.Default, cfg)
-	return GrafanaClient{client}
+	return &GrafanaClient{client}, nil
 }
 
-func (c GrafanaClient) GetOrgs() ([]*models.OrgDTO, error) {
+func (c *GrafanaClient) GetOrgs() ([]*models.OrgDTO, error) {
 	orgs, err := c.client.Orgs.SearchOrgs(nil, nil)
 	if err != nil {
-		return nil, err
+		return nil, oops.
+			In("GetOrgs").
+			Wrap(err)
 	}
 	if !orgs.IsSuccess() {
-		return nil, errors.New("Fetching orgs was not successful")
+		return nil, oops.
+			In("GetOrgs").
+			With("orgs", orgs).
+			Wrap(err)
 	}
 
 	return orgs.GetPayload(), nil
 }
 
-func (c GrafanaClient) GetDashboardsInOrg(orgID int64) ([]mymodels.Dashboard, error) {
+func putDashInCache(dashUid string, dash models.JSON) {
+	logger := logger.WithPrefix("Dashboard cache (put)")
+	logger.Debug("Locking mutex...", "uid", dashUid)
+	dashboardCacheMutex.Lock()
+	logger.Debug("Locked.", "uid", dashUid)
+
+	dashboardCache[dashUid] = dash
+
+	logger.Debug("UNlocking mutex...", "uid", dashUid)
+	dashboardCacheMutex.Unlock()
+	logger.Debug("Unlocked.", "uid", dashUid)
+}
+
+func isDashInCache(dashUid string) bool {
+	logger := logger.WithPrefix("Dashboard cache (is)")
+	logger.Debug("Locking mutex...", "uid", dashUid)
+	dashboardCacheMutex.Lock()
+	logger.Debug("Locked.", "uid", dashUid)
+
+	_, ok := dashboardCache[dashUid]
+
+	logger.Debug("UNlocking mutex...", "uid", dashUid)
+	dashboardCacheMutex.Unlock()
+	logger.Debug("Unlocked.", "uid", dashUid)
+	return ok
+}
+
+func getDashInCache(dashUid string) models.JSON {
+	logger := logger.WithPrefix("Dashboard cache (get)")
+	logger.Debug("Locking mutex...", "uid", dashUid)
+	dashboardCacheMutex.Lock()
+	logger.Debug("Locked.", "uid", dashUid)
+
+	dash := dashboardCache[dashUid]
+
+	logger.Debug("UNlocking mutex...", "uid", dashUid)
+	dashboardCacheMutex.Unlock()
+	logger.Debug("Unlocked.", "uid", dashUid)
+
+	return dash
+}
+
+func (c *GrafanaClient) DoesDashboardExist(dashUid string) bool {
+	logger := logger.
+		WithPrefix("Does Dashboard exist?").
+		With("uid", dashUid)
+	if isDashInCache(dashUid) {
+		logger.Debug("In cache")
+		return true
+	}
+	dashReq, err := c.client.Dashboards.GetDashboardByUID(dashUid)
+	if _, ok := err.(*client_dashboards.GetDashboardByUIDNotFound); ok {
+		logger.Debug("Not found")
+		return false
+	}
+	// TODO: Technically an ACL check, but we'll figure this out later.
+	if _, ok := err.(*client_dashboards.GetDashboardByUIDForbidden); ok {
+		logger.Debug("Forbidden")
+		return false
+	}
+	logger.With("dashReq", dashReq).Debug("Probably exists")
+	return dashReq.IsSuccess()
+}
+
+func (c *GrafanaClient) GetDashboardsInOrg(orgID int64) ([]mymodels.Dashboard, error) {
+	oopsMaker := oops.In("GetDashboardsInOrg")
 	params := &search.SearchParams{Type: tools.PtrOf("dashboard-ds")}
 
-	dashboards, err := c.client.WithOrgID(orgID).Search.Search(params, nil)
+	orgClient := c.client.WithOrgID(orgID)
+	org, err := orgClient.Org.GetCurrentOrg()
 	if err != nil {
-		return nil, err
+		return nil, oopsMaker.Wrap(err)
+	}
+	if !org.IsSuccess() {
+		return nil, oopsMaker.
+			With("org", org).
+			Wrap(err)
+	}
+	orgData := org.GetPayload()
+
+	dashboards, err := orgClient.Search.Search(params, nil)
+	if err != nil {
+		return nil, oopsMaker.
+			With("dashboards", dashboards).
+			Wrap(err)
 	}
 
 	var filteredDashboards []mymodels.Dashboard
 	for _, vv := range dashboards.GetPayload() {
-		if string(vv.Type) == "dash-folder" {
-			continue
+		oopsMaker = oopsMaker.With("searchHit", vv)
+		if !isDashInCache(vv.UID) {
+			if !c.DoesDashboardExist(vv.UID) {
+				continue
+			}	
+			dashReq, err := c.client.Dashboards.GetDashboardByUID(vv.UID)
+			if _, ok := err.(*client_dashboards.GetDashboardByUIDNotFound); ok {
+				continue
+			}
+			if err != nil {
+				if dashReq != nil {
+					oopsMaker = oopsMaker.With("dashReq", dashReq)
+				}
+				return nil, oopsMaker.
+					Wrap(err)
+			}
+			if !dashReq.IsSuccess() {
+				return nil, oopsMaker.
+					With("dashReq", dashReq).
+					Wrap(err)
+			}
+			if string(vv.Type) == "dash-folder" || dashReq.GetPayload().Meta.IsFolder {
+				continue
+			}
+			// Write to cache; mind the threads!
+			putDashInCache(vv.UID, dashReq.GetPayload().Dashboard)
 		}
+
 		filteredDashboards = append(filteredDashboards, mymodels.Dashboard{
-			ID: vv.FolderID,
-			UID: vv.FolderUID,
+			ID: vv.ID,
+			UID: vv.UID,
 			Title: vv.Title,
 			Slug: vv.Slug,
+			OrgID: orgData.ID,
+			OrgName: orgData.Name,
 		})
 	}
 	
 	return filteredDashboards, nil
 }
 
-func (c GrafanaClient) GetVariablesInDashboard() {}
+func (c *GrafanaClient) GetVariablesInDashboard(dashUid string) (map[string]string, error) {
+	oopsMaker := oops.In("GetDashboardsInOrg")
+	var thisDash models.JSON
+	if isDashInCache(dashUid) {
+		thisDash = getDashInCache(dashUid)
+	} else {
+		dashReq, err := c.client.Dashboards.GetDashboardByUID(dashUid)
+		if err != nil {
+			if dashReq != nil {
+				oopsMaker = oopsMaker.With("dashReq", dashReq)
+			}
+			return nil, oopsMaker.
+				Wrap(err)
+		}
+		if !dashReq.IsSuccess() {
+			return nil, oopsMaker.
+				With("dashReq", dashReq).
+				Wrap(err)
+		}
+		thisDash = dashReq.GetPayload().Dashboard
+		putDashInCache(dashUid, thisDash)
+	}
+
+	// I hate this SO! MUCH!
+	var vars = make(map[string]string)
+	templating := thisDash.(map[string]interface{})["templating"]
+	if templating != nil {
+		templateList := templating.(map[string]interface{})["list"]
+		if templateList != nil {
+			for _, v := range templateList.([]interface{}) {
+				// at _least_ I can cast into structs...
+				if x == nil { continue }
+				x := v.(struct {
+					name string
+					current struct {
+						text string
+						value string
+					}
+				})
+				name := x.name
+				current := x.current.value
+				vars[name] = current
+			}
+		}
+	}
+	return vars, nil
+}
