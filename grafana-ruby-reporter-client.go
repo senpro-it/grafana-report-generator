@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 
+	"github.com/samber/oops"
 	"github.com/senpro-it/grafana-report-generator/models"
 )
 
@@ -21,13 +22,13 @@ const (
 	REPORT_STATUS_UNKNOWN  ReportStatus = "Unknown"
 )
 
-type RGPClient struct {
+type GRRClient struct {
 	baseUrl string
 	client  *http.Client
 }
 
-func NewRGPClient(baseUrl string) RGPClient {
-	return RGPClient{
+func NewGRRClient(baseUrl string) *GRRClient {
+	return &GRRClient{
 		baseUrl: baseUrl,
 		client: &http.Client{
 			Jar: &cookiejar.Jar{},
@@ -35,21 +36,25 @@ func NewRGPClient(baseUrl string) RGPClient {
 	}
 }
 
-func (c RGPClient) make_query(template string, vars map[string]string) url.Values {
+func (c *GRRClient) make_query(template string, from string, to string, vars map[string]string) url.Values {
 	vals := url.Values{}
 
-	if template == "" {
+	if template != "" {
 		vals.Add("var-template", template)
 	}
 
+	vals.Add("from", from)
+	vals.Add("to", to)
+
 	for k, v := range vars {
-		vals.Add(k, v)
+		vals.Add("var-" + k, v)
 	}
 
 	return vals
 }
 
-func (c RGPClient) do_request(method string, endpoint string, vals url.Values) (*http.Response, error) {
+func (c *GRRClient) do_request(method string, endpoint string, vals url.Values) (*http.Response, error) {
+	oopsBuilder := oops.In("do_request")
 	// Build request
 	var apiUrl string
 	if endpoint[0] == '/' {
@@ -61,21 +66,17 @@ func (c RGPClient) do_request(method string, endpoint string, vals url.Values) (
 	req, err := http.NewRequest(method, fullUrl, nil)
 	logger.Debug(
 		"Creating request",
-		"method",
-		method,
-		"url",
-		fullUrl,
+		"method", method,
+		"url", fullUrl,
 	)
 	if err != nil {
-		logger.Error("Could not create request", "err", err)
-		return nil, err
+		return nil, oopsBuilder.Wrap(err)
 	}
 
 	// Do request
 	res, err := c.client.Do(req)
 	if err != nil {
-		logger.Error("Could not do request", "err", err)
-		return nil, err
+		return nil, oops.Wrap(err)
 	}
 
 	logger.Debug(
@@ -90,50 +91,47 @@ func (c RGPClient) do_request(method string, endpoint string, vals url.Values) (
 }
 
 // Implements POST /api/v1/render
-func (c RGPClient) CreateReport(template string, vars map[string]string) (int, error) {
+func (c *GRRClient) CreateReport(template string, from string, to string, vars map[string]string) (int, error) {
+	oopsBuilder := oops.In("CreateReport")
 	logger.Info("Creating new report", "template", template, "vars", vars)
-	res, err := c.do_request("POST", "render", c.make_query(template, vars))
+	res, err := c.do_request("POST", "render", c.make_query(template, from, to, vars))
 	if err != nil {
-		logger.Error("Unable to do request")
-		return -1, err
+		return -1, oopsBuilder.Wrap(err)
 	}
 
 	if res.StatusCode != 200 {
 		logger.Error("Could not create report", "template", template, "vars", vars)
-		return -1, errors.New("unable to create report")
+		return -1, oopsBuilder.Errorf("unable to create report")
 	}
 
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
-		logger.Error("Unable to read HTTP response", "body", body)
-		return -1, err
+		return -1, oopsBuilder.Wrap(err)
 	}
 
 	var body_json interface{}
 	err = json.Unmarshal(body, &body_json)
 	if err != nil {
-		logger.Error("Unable to parse JSON", "json", body)
-		return -1, err
+		return -1, oopsBuilder.Wrap(err)
 	}
 
 	report_id, err := strconv.Atoi(body_json.(map[string]interface{})["report_id"].(string))
 	if err != nil {
-		logger.Error("Unable to convert report_id", "json", body_json)
-		return -1, err
+		return -1, oopsBuilder.With("json", body_json).Wrap(err)
 	}
 
 	return report_id, nil
 }
 
 // Implements GET /api/v1/status
-func (c RGPClient) GetReportStatus(reportId int) ReportStatus {
+func (c *GRRClient) GetReportStatus(reportId int) ReportStatus {
 	vars := map[string]string{
 		"report_id": strconv.Itoa(reportId),
 	}
 	res, err := c.do_request(
 		"GET",
 		"status",
-		c.make_query("", vars),
+		c.make_query("", "", "", vars),
 	)
 	if res.StatusCode != 200 || err != nil {
 		logger.Error(
@@ -175,14 +173,14 @@ func (c RGPClient) GetReportStatus(reportId int) ReportStatus {
 }
 
 // Implements GET /view_log
-func (c RGPClient) GetReportLog(reportId int) (string, error) {
+func (c *GRRClient) GetReportLog(reportId int) (string, error) {
 	vars := map[string]string{
 		"report_id": strconv.Itoa(reportId),
 	}
 	res, err := c.do_request(
 		"DELETE",
 		"cancel",
-		c.make_query("", vars),
+		c.make_query("", "", "", vars),
 	)
 	if err != nil {
 		logger.Error("Failed to request")
@@ -202,20 +200,20 @@ func (c RGPClient) GetReportLog(reportId int) (string, error) {
 }
 
 // Implements DELETE /api/v1/cancel
-func (c RGPClient) CancelReport(reportId int) (bool, error) {
+func (c *GRRClient) CancelReport(reportId int) (bool, error) {
 	vars := map[string]string{
 		"report_id": strconv.Itoa(reportId),
 	}
 	res, err := c.do_request(
 		"DELETE",
 		"cancel",
-		c.make_query("", vars),
+		c.make_query("", "", "", vars),
 	)
 	return res.StatusCode == 200 || err != nil, err
 }
 
 // Implements /view_report
-func (c RGPClient) GetReport(reportId int) ([]byte, bool, error) {
+func (c *GRRClient) GetReport(reportId int) ([]byte, bool, error) {
 	// TODO:
 	// - Query report status
 	// - If done, fetch report from endpoint
