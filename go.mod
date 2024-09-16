@@ -4,10 +4,16 @@ go 1.22.2
 
 require (
 	github.com/charmbracelet/log v0.4.0
-	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc
 	github.com/go-openapi/strfmt v0.23.0
 	github.com/grafana/grafana-openapi-client-go v0.0.0-20240826142251-d1c93bae4198
+	github.com/samber/oops v1.13.1
 	github.com/spf13/viper v1.19.0
+)
+
+require (
+	github.com/oklog/ulid/v2 v2.1.0 // indirect
+	github.com/samber/lo v1.38.1 // indirect
+	github.com/shivamMg/ppds v0.0.1 // indirect
 )
 
 require (
@@ -44,11 +50,12 @@ require (
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/sagikazarmark/locafero v0.4.0 // indirect
 	github.com/sagikazarmark/slog-shim v0.1.0 // indirect
-	github.com/sourcegraph/conc v0.3.0 // indirect
+	github.com/sourcegraph/conc v0.3.0
 	github.com/spf13/afero v1.11.0 // indirect
 	github.com/spf13/cast v1.6.0 // indirect
-	github.com/spf13/pflag v1.0.5 // indirect
+	github.com/spf13/pflag v1.0.5
 	github.com/subosito/gotenv v1.6.0 // indirect
+	github.com/wneessen/go-mail v0.4.4
 	go.mongodb.org/mongo-driver v1.16.1 // indirect
 	go.opentelemetry.io/otel v1.29.0 // indirect
 	go.opentelemetry.io/otel/metric v1.29.0 // indirect
