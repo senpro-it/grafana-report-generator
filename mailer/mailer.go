@@ -3,6 +3,7 @@ package mailer
 import (
 	"io"
 
+	"github.com/samber/oops"
 	mail "github.com/wneessen/go-mail"
 )
 
@@ -16,12 +17,13 @@ type Mailer struct {
 }
 
 func (m *Mailer) Send(to string, subject string, attachment io.ReadSeeker) (bool, error) {
+	oopsBuilder := oops.In("Mailer::Send")
 	msg := mail.NewMsg()
 	if err := msg.From(m.From); err != nil {
-		return false, err
+		return false, oopsBuilder.Wrap(err)
 	}
 	if err := msg.To(to); err != nil {
-		return false, err
+		return false, oopsBuilder.Wrap(err)
 	}
 	msg.Subject(subject)
 	msg.SetDate()
@@ -39,11 +41,14 @@ func (m *Mailer) Send(to string, subject string, attachment io.ReadSeeker) (bool
 		mail.WithDebugLog(),
 	)
 	if err != nil {
-		return false, err
+		return false, oopsBuilder.Wrap(err)
 	}
 	defer client.Close()
 
 	err = client.DialAndSend(msg)
+	if err != nil {
+		err = oops.Wrap(err)
+	}
 
 	return err != nil, err
 }
